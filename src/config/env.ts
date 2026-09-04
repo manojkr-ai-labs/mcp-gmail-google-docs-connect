@@ -7,6 +7,8 @@ export interface Config {
   googleClientSecret: string;
   googleRedirectUri: string;
   googleTokenPath: string;
+  googleRefreshToken?: string;
+  mcpAuthToken?: string;
   logLevel: LogLevel;
 }
 
@@ -36,6 +38,8 @@ export function loadConfig(): Config {
     googleTokenPath: process.env.GOOGLE_TOKEN_PATH?.trim()
       ? path.resolve(process.env.GOOGLE_TOKEN_PATH.trim())
       : path.resolve(process.cwd(), DEFAULT_TOKEN_PATH),
+    googleRefreshToken: process.env.GOOGLE_REFRESH_TOKEN?.trim() || undefined,
+    mcpAuthToken: process.env.MCP_AUTH_TOKEN?.trim() || undefined,
     logLevel: parseLogLevel(process.env.LOG_LEVEL),
   };
 

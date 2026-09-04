@@ -7,7 +7,7 @@ The server is a standalone integration. It does not contain logic for a specific
 ```
 AI Agent / MCP Client
         |
-        | MCP (stdio)
+        | MCP (stdio locally, or Streamable HTTP on Railway)
         v
 Generic MCP Server
   draft_email | send_email | append_to_google_doc
@@ -97,6 +97,10 @@ Edit `.env`:
 | `GOOGLE_CLIENT_SECRET` | yes | OAuth client secret |
 | `GOOGLE_REDIRECT_URI` | no | Default `http://127.0.0.1:3000/oauth2callback` |
 | `GOOGLE_TOKEN_PATH` | no | Default `.tokens/google-token.json` (gitignored) |
+| `GOOGLE_REFRESH_TOKEN` | hosted | Refresh token from the local `npm run auth` file. Required on Railway because the container disk is ephemeral. |
+| `MCP_AUTH_TOKEN` | hosted | Bearer token that clients must send to `POST /mcp`. Generate with `openssl rand -hex 32`. |
+| `PORT` | injected | When set (Railway always sets it), the process serves Streamable HTTP instead of stdio. |
+| `MCP_TRANSPORT` | no | `http` or `stdio` to force a transport. |
 | `LOG_LEVEL` | no | `debug`, `info`, `warn`, or `error` (default `info`) |
 
 Do not commit `.env`, `.tokens/`, `token.json`, or `credentials.json`.
@@ -113,13 +117,25 @@ Re-run `npm run auth` if you see `AUTH_REQUIRED` or `AUTH_EXPIRED`, or after cha
 
 ## 8. Run the server
 
-The MCP server speaks **stdio**. It waits for a client on stdin; it is not an HTTP website.
+Local agents (Cursor, Claude Desktop) use **stdio**. Railway uses **Streamable HTTP** when `PORT` is set.
 
 ```bash
-npm start
+npm run dev
 ```
 
-Logs go to **stderr**. stdout is reserved for MCP JSON-RPC.
+That is stdio unless `PORT` or `MCP_TRANSPORT=http` is set. Production (`npm start`) runs `node dist/index.js` after `npm run build`.
+
+Logs go to **stderr**. On stdio, stdout is reserved for MCP JSON-RPC.
+
+Local HTTP (for Inspector against a TCP port):
+
+```bash
+set PORT=3000
+set MCP_AUTH_TOKEN=dev-token
+npm run dev
+```
+
+Then `GET http://127.0.0.1:3000/health` should return `{"ok":true}`.
 
 Typecheck:
 
@@ -161,11 +177,36 @@ If you already ran `npm run auth` in this directory, you can omit secrets from `
 
 Add the same `command` / `args` / `cwd` block under `mcpServers` in the Claude Desktop config file.
 
+### Hosted (Railway) Cursor config
+
+After the service is deployed and Variables include `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, and `MCP_AUTH_TOKEN`:
+
+```json
+{
+  "mcpServers": {
+    "gmail-docs": {
+      "url": "https://mcp-gmail-google-docs-connect-production.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+Open the Railway URL in a browser and you should see JSON pointing at `/mcp` and `/health`. That is not a website UI. Cursor talks to `/mcp` with the bearer token. `GET /health` needs no auth.
+
+Copy `refresh_token` from the local `.tokens/google-token.json` (created by `npm run auth`) into Railway’s `GOOGLE_REFRESH_TOKEN`. Do not commit that file.
+
 ### MCP Inspector
+
+Stdio:
 
 ```bash
 npx @modelcontextprotocol/inspector npx tsx src/index.ts
 ```
+
+HTTP: start the server with `PORT` and `MCP_AUTH_TOKEN`, then in Inspector choose Streamable HTTP and `http://127.0.0.1:3000/mcp` with `Authorization: Bearer <token>`.
 
 Run it from the project root after `.env` is filled and `npm run auth` has succeeded. Connect, open Tools, and you should see `draft_email`, `send_email`, and `append_to_google_doc`.
 
@@ -281,6 +322,7 @@ Raw Google API payloads are not returned.
 - Logs (stderr JSON) record tool name, outcome, error code, duration, and API operation. They do **not** record access tokens, refresh tokens, client secrets, email bodies, or document contents.
 - Tool errors do not include stack traces or credentials.
 - `send_email` is an explicit tool. The server never infers send permission from generated text.
+- Hosted `/mcp` requires `MCP_AUTH_TOKEN`. `/health` is unauthenticated and does not call Google.
 - Operations run as the Google user who completed `npm run auth`. Google still enforces document ACLs.
 - Do not retry `send_email` or `append_to_google_doc` automatically after `NETWORK_ERROR` or timeouts. The side effect may already have succeeded.
 
@@ -289,14 +331,14 @@ Raw Google API payloads are not returned.
 | Symptom | What to do |
 |---------|------------|
 | Server exits immediately mentioning `.env.example` | Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. |
-| `AUTH_REQUIRED` | Run `npm run auth` from the same working directory the MCP host uses (`cwd`). |
+| `AUTH_REQUIRED` | Local: run `npm run auth` from the same `cwd` the host uses. Hosted: set `GOOGLE_REFRESH_TOKEN` from that token file. |
 | `AUTH_EXPIRED` / `invalid_grant` | Revoke the app at [Google Account permissions](https://myaccount.google.com/permissions), then `npm run auth` again. |
 | `403: access_denied` on consent | Add your Google account as an OAuth test user. |
 | `INSUFFICIENT_SCOPE` | Confirm both scopes on the consent screen and re-run `npm run auth` with `prompt=consent` (the CLI already requests consent). |
 | `DOCUMENT_NOT_FOUND` / `ACCESS_DENIED` | Check the Doc ID and that the authorized account can edit the document. |
 | Redirect URI mismatch | `GOOGLE_REDIRECT_URI` must match the URI registered on the OAuth client. Port 3000 must be free during `npm run auth`. |
 | Duplicate emails or duplicate appended paragraphs | The agent retried a side-effecting tool. Do not retry send/append on uncertain errors. |
-| Client cannot see tools | Confirm stdio config (`command`/`args`/`cwd`), Node 20+, and that logs appear on stderr when the host starts the process. |
+| Railway `Application failed to respond` / 502 | The process must listen on `0.0.0.0:$PORT`. Redeploy this HTTP build (`npm start` → `node dist/index.js`). Set `MCP_AUTH_TOKEN`. Healthcheck path: `/health`. |
 | `npx tsx` fails in the host | Run `npm install` in this repo; or use `node` with a compiled `dist/index.js` after `npm run build`. |
 
 ### Manual live checks (not run in CI)
@@ -320,7 +362,8 @@ New OAuth scopes require a new consent run (`npm run auth`). Do not request extr
 
 ```
 src/
-  index.ts                 # stdio entry
+  index.ts                 # stdio or HTTP (PORT / MCP_TRANSPORT)
+  http.ts                  # Streamable HTTP app (/mcp, /health)
   server/create-server.ts  # MCP server factory
   tools/                   # MCP tool layer
   services/                # Gmail + Docs + MIME

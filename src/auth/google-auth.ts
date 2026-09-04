@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { google } from 'googleapis';
 import type { Auth } from 'googleapis';
-import { loadConfig } from '../config/env.js';
+import { loadConfig, type Config } from '../config/env.js';
 import { AppError } from '../errors/app-error.js';
 import { mapGoogleError } from '../errors/google-errors.js';
 import type { DocsApi } from '../services/google-docs-service.js';
@@ -19,6 +19,21 @@ export const GOOGLE_SCOPES = [
 type OAuth2Client = Auth.OAuth2Client;
 type Credentials = Auth.Credentials;
 
+export type TokenSource =
+  | { kind: 'env'; credentials: Credentials }
+  | { kind: 'file'; path: string }
+  | { kind: 'missing' };
+
+export function resolveTokenSource(config: Config): TokenSource {
+  if (config.googleRefreshToken) {
+    return { kind: 'env', credentials: { refresh_token: config.googleRefreshToken } };
+  }
+  if (existsSync(config.googleTokenPath)) {
+    return { kind: 'file', path: config.googleTokenPath };
+  }
+  return { kind: 'missing' };
+}
+
 export function createOAuth2Client(): OAuth2Client {
   const config = loadConfig();
   return new google.auth.OAuth2(
@@ -30,32 +45,42 @@ export function createOAuth2Client(): OAuth2Client {
 
 export async function getAuthorizedClient(): Promise<OAuth2Client> {
   const config = loadConfig();
-  if (!existsSync(config.googleTokenPath)) {
+  const source = resolveTokenSource(config);
+  const oauth2Client = createOAuth2Client();
+  let tokens: Credentials;
+  let persistToFile = false;
+
+  if (source.kind === 'missing') {
     throw new AppError(
       'AUTH_REQUIRED',
-      'Google authorization is required. Run npm run auth, then retry the tool.',
+      'Google authorization is required. Set GOOGLE_REFRESH_TOKEN or run npm run auth, then retry the tool.',
     );
   }
 
-  const oauth2Client = createOAuth2Client();
-  let tokens: Credentials;
-  try {
-    const raw = await readFile(config.googleTokenPath, 'utf8');
-    tokens = JSON.parse(raw) as Credentials;
-  } catch (err) {
-    throw new AppError(
-      'AUTH_EXPIRED',
-      'The stored Google token file is unreadable or invalid. Run npm run auth to re-authorize.',
-      err,
-    );
+  if (source.kind === 'env') {
+    tokens = source.credentials;
+  } else {
+    persistToFile = true;
+    try {
+      const raw = await readFile(source.path, 'utf8');
+      tokens = JSON.parse(raw) as Credentials;
+    } catch (err) {
+      throw new AppError(
+        'AUTH_EXPIRED',
+        'The stored Google token file is unreadable or invalid. Run npm run auth to re-authorize.',
+        err,
+      );
+    }
   }
 
   oauth2Client.setCredentials(tokens);
-  oauth2Client.on('tokens', (newTokens) => {
-    void persistTokens({ ...tokens, ...newTokens }).catch(() => {
-      // Refresh persistence is best-effort; never log token contents.
+  if (persistToFile) {
+    oauth2Client.on('tokens', (newTokens) => {
+      void persistTokens({ ...tokens, ...newTokens }).catch(() => {
+        // Refresh persistence is best-effort; never log token contents.
+      });
     });
-  });
+  }
 
   try {
     const accessToken = await oauth2Client.getAccessToken();
