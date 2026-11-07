@@ -185,7 +185,7 @@ After the service is deployed and Variables include `GOOGLE_CLIENT_ID`, `GOOGLE_
 {
   "mcpServers": {
     "gmail-docs": {
-      "url": "https://mcp-gmail-google-docs-connect-production.up.railway.app/mcp",
+      "url": "https://gmail-docs-mcp-production.up.railway.app/mcp",
       "headers": {
         "Authorization": "Bearer <MCP_AUTH_TOKEN>"
       }

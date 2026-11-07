@@ -1,0 +1,9 @@
+.cursor
+.tokens
+.env
+.env.*
+token.json
+credential.json
+credentials.json
+node_modules
+dist
